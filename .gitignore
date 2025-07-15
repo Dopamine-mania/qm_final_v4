@@ -82,10 +82,7 @@ $RECYCLE.BIN/
 *~
 
 # Project specific
-.claude/
-Prompt/
 legacy/
-clamp3/
 materials/video/*.mp4
 materials/segments/
 materials/features/

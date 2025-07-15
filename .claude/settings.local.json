@@ -1,0 +1,27 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__graphiti-memory__search_memory_nodes",
+      "mcp__graphiti-memory__search_memory_facts",
+      "mcp__graphiti-memory__add_memory",
+      "Bash(chmod:*)",
+      "Bash(ls:*)",
+      "Bash(git add:*)",
+      "Bash(rm:*)",
+      "Bash(git push:*)",
+      "Bash(git config:*)",
+      "Bash(git remote set-url:*)",
+      "Bash(git reset:*)",
+      "Bash(find:*)",
+      "Bash(git rm:*)",
+      "Bash(git commit:*)",
+      "WebFetch(domain:github.com)",
+      "Bash(git init:*)",
+      "Bash(mkdir:*)",
+      "Bash(git remote add:*)",
+      "Bash(git branch:*)",
+      "WebFetch(domain:raw.githubusercontent.com)"
+    ],
+    "deny": []
+  }
+}
