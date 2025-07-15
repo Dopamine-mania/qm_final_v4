@@ -286,34 +286,206 @@ class VideoRetrievalEngine:
             return 0.0
         
         try:
-            # 获取情绪特征向量
-            emotion_vector = self.emotion_database[emotion]['normalized_vector']
-            
-            # 转换音频特征为向量
-            audio_vector = self._audio_features_to_vector(video_features)
-            audio_vector_norm = self._normalize_vector(audio_vector)
-            
-            # 确保向量长度一致
-            min_len = min(len(emotion_vector), len(audio_vector_norm))
-            emotion_vec = emotion_vector[:min_len]
-            audio_vec = audio_vector_norm[:min_len]
-            
-            # 计算余弦相似度
-            dot_product = np.dot(emotion_vec, audio_vec)
-            cosine_similarity = max(0.0, dot_product)  # 确保非负
-            
-            # 计算欧几里得距离相似度
-            euclidean_distance = np.linalg.norm(emotion_vec - audio_vec)
-            euclidean_similarity = 1.0 / (1.0 + euclidean_distance)
-            
-            # 加权组合
-            final_similarity = 0.7 * cosine_similarity + 0.3 * euclidean_similarity
-            
-            return float(final_similarity)
-            
+            # 检查是否有CLAMP3特征
+            if 'clamp3_features' in video_features or 'feature_vector' in video_features:
+                return self._calculate_clamp3_similarity(emotion, video_features)
+            else:
+                return self._calculate_traditional_similarity(emotion, video_features)
+                
         except Exception as e:
             logger.error(f"相似度计算失败: {e}")
             return 0.0
+    
+    def _calculate_clamp3_similarity(self, emotion: str, video_features: Dict[str, Any]) -> float:
+        """
+        使用CLAMP3特征计算相似度
+        
+        Args:
+            emotion: 目标情绪
+            video_features: 包含CLAMP3特征的视频特征
+            
+        Returns:
+            float: 相似度分数 (0-1)
+        """
+        # 获取CLAMP3特征向量
+        clamp3_vector = video_features.get('clamp3_features') or video_features.get('feature_vector')
+        
+        if clamp3_vector is None:
+            logger.warning("CLAMP3特征向量为空")
+            return 0.0
+        
+        # 确保是numpy数组
+        if not isinstance(clamp3_vector, np.ndarray):
+            clamp3_vector = np.array(clamp3_vector)
+        
+        # 如果是2D数组，取第一个维度
+        if clamp3_vector.ndim > 1:
+            clamp3_vector = clamp3_vector.flatten()
+        
+        # 获取情绪特征向量
+        emotion_vector = self.emotion_database[emotion]['normalized_vector']
+        
+        # 对于CLAMP3特征，我们需要先将其映射到情绪空间
+        # 这里使用简化的方法：基于CLAMP3特征的统计特性
+        
+        # 计算CLAMP3特征的统计特性
+        clamp3_stats = self._extract_clamp3_statistics(clamp3_vector)
+        
+        # 将统计特性映射到情绪特征空间
+        mapped_audio_vector = self._map_clamp3_to_emotion_space(clamp3_stats)
+        mapped_audio_vector_norm = self._normalize_vector(mapped_audio_vector)
+        
+        # 确保向量长度一致
+        min_len = min(len(emotion_vector), len(mapped_audio_vector_norm))
+        emotion_vec = emotion_vector[:min_len]
+        audio_vec = mapped_audio_vector_norm[:min_len]
+        
+        # 计算余弦相似度
+        dot_product = np.dot(emotion_vec, audio_vec)
+        cosine_similarity = max(0.0, dot_product)  # 确保非负
+        
+        # 计算欧几里得距离相似度
+        euclidean_distance = np.linalg.norm(emotion_vec - audio_vec)
+        euclidean_similarity = 1.0 / (1.0 + euclidean_distance)
+        
+        # 加权组合（CLAMP3特征更依赖余弦相似度）
+        final_similarity = 0.8 * cosine_similarity + 0.2 * euclidean_similarity
+        
+        return float(final_similarity)
+    
+    def _extract_clamp3_statistics(self, clamp3_vector: np.ndarray) -> Dict[str, float]:
+        """
+        从CLAMP3特征向量中提取统计特性
+        
+        Args:
+            clamp3_vector: CLAMP3特征向量
+            
+        Returns:
+            Dict: 统计特性
+        """
+        stats = {}
+        
+        # 基础统计量
+        stats['mean'] = float(np.mean(clamp3_vector))
+        stats['std'] = float(np.std(clamp3_vector))
+        stats['max'] = float(np.max(clamp3_vector))
+        stats['min'] = float(np.min(clamp3_vector))
+        stats['median'] = float(np.median(clamp3_vector))
+        
+        # 分位数特征
+        stats['q25'] = float(np.percentile(clamp3_vector, 25))
+        stats['q75'] = float(np.percentile(clamp3_vector, 75))
+        stats['iqr'] = stats['q75'] - stats['q25']
+        
+        # 形状特征
+        stats['skewness'] = float(self._calculate_skewness(clamp3_vector))
+        stats['kurtosis'] = float(self._calculate_kurtosis(clamp3_vector))
+        
+        # 能量特征
+        stats['energy'] = float(np.sum(clamp3_vector ** 2))
+        stats['rms'] = float(np.sqrt(np.mean(clamp3_vector ** 2)))
+        
+        # 频域特征（将CLAMP3特征视为时间序列）
+        fft_features = np.fft.fft(clamp3_vector)
+        magnitude = np.abs(fft_features)
+        stats['spectral_centroid'] = float(np.sum(np.arange(len(magnitude)) * magnitude) / np.sum(magnitude))
+        
+        return stats
+    
+    def _calculate_skewness(self, data: np.ndarray) -> float:
+        """计算偏度"""
+        if len(data) < 3:
+            return 0.0
+        mean = np.mean(data)
+        std = np.std(data)
+        if std == 0:
+            return 0.0
+        return np.mean(((data - mean) / std) ** 3)
+    
+    def _calculate_kurtosis(self, data: np.ndarray) -> float:
+        """计算峰度"""
+        if len(data) < 4:
+            return 0.0
+        mean = np.mean(data)
+        std = np.std(data)
+        if std == 0:
+            return 0.0
+        return np.mean(((data - mean) / std) ** 4) - 3
+    
+    def _map_clamp3_to_emotion_space(self, clamp3_stats: Dict[str, float]) -> np.ndarray:
+        """
+        将CLAMP3统计特性映射到情绪特征空间
+        
+        Args:
+            clamp3_stats: CLAMP3统计特性
+            
+        Returns:
+            np.ndarray: 映射后的情绪空间特征向量
+        """
+        # 创建映射向量（与情绪特征向量相同长度）
+        mapped_vector = []
+        
+        # 1. 节拍特征（基于能量和变化）
+        tempo_proxy = min(abs(clamp3_stats['energy']) / 10.0, 1.0)
+        mapped_vector.append(tempo_proxy)
+        
+        # 2. 调性特征（基于频谱质心）
+        key_proxy = min(abs(clamp3_stats['spectral_centroid']) / 100.0, 1.0)
+        mapped_vector.append(key_proxy)
+        
+        # 3. 动态特征（基于标准差）
+        dynamics_proxy = min(clamp3_stats['std'] * 2.0, 1.0)
+        mapped_vector.append(dynamics_proxy)
+        
+        # 4. 情绪强度（基于RMS）
+        intensity_proxy = min(clamp3_stats['rms'] * 5.0, 1.0)
+        mapped_vector.append(intensity_proxy)
+        
+        # 5. 复杂度（基于偏度）
+        complexity_proxy = min(abs(clamp3_stats['skewness']) / 2.0, 1.0)
+        mapped_vector.append(complexity_proxy)
+        
+        # 6. 织体特征（基于峰度）
+        texture_proxy = min(abs(clamp3_stats['kurtosis']) / 5.0, 1.0)
+        mapped_vector.append(texture_proxy)
+        
+        return np.array(mapped_vector, dtype=np.float32)
+    
+    def _calculate_traditional_similarity(self, emotion: str, video_features: Dict[str, Any]) -> float:
+        """
+        使用传统特征计算相似度
+        
+        Args:
+            emotion: 目标情绪
+            video_features: 传统音频特征
+            
+        Returns:
+            float: 相似度分数 (0-1)
+        """
+        # 获取情绪特征向量
+        emotion_vector = self.emotion_database[emotion]['normalized_vector']
+        
+        # 转换音频特征为向量
+        audio_vector = self._audio_features_to_vector(video_features)
+        audio_vector_norm = self._normalize_vector(audio_vector)
+        
+        # 确保向量长度一致
+        min_len = min(len(emotion_vector), len(audio_vector_norm))
+        emotion_vec = emotion_vector[:min_len]
+        audio_vec = audio_vector_norm[:min_len]
+        
+        # 计算余弦相似度
+        dot_product = np.dot(emotion_vec, audio_vec)
+        cosine_similarity = max(0.0, dot_product)  # 确保非负
+        
+        # 计算欧几里得距离相似度
+        euclidean_distance = np.linalg.norm(emotion_vec - audio_vec)
+        euclidean_similarity = 1.0 / (1.0 + euclidean_distance)
+        
+        # 加权组合
+        final_similarity = 0.7 * cosine_similarity + 0.3 * euclidean_similarity
+        
+        return float(final_similarity)
     
     def retrieve_videos(self, 
                        emotion: str, 

@@ -2,6 +2,7 @@
 """
 特征提取模块 - 4.0版本核心组件
 负责从视频片段中提取音乐特征，为检索提供基础
+使用CLAMP3音乐理解大模型进行高级音乐特征提取
 """
 
 import os
@@ -9,6 +10,7 @@ import json
 import numpy as np
 import subprocess
 import tempfile
+import shutil
 from pathlib import Path
 from typing import Dict, List, Any, Optional, Tuple
 from datetime import datetime
@@ -19,37 +21,62 @@ import hashlib
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-class AudioFeatureExtractor:
+class CLAMP3FeatureExtractor:
     """
-    音频特征提取器
-    从视频中提取音频并分析其音乐特征
+    CLAMP3音乐特征提取器
+    使用CLAMP3模型从视频中提取高级音乐特征
     """
     
-    def __init__(self, features_dir: str = "materials/features"):
+    def __init__(self, clamp3_dir: str = "CLAMP3", features_dir: str = "materials/features"):
         """
-        初始化特征提取器
+        初始化CLAMP3特征提取器
         
         Args:
+            clamp3_dir: CLAMP3项目目录
             features_dir: 特征存储目录
         """
+        self.clamp3_dir = Path(clamp3_dir)
         self.features_dir = Path(features_dir)
         self.features_dir.mkdir(parents=True, exist_ok=True)
+        
+        # 验证CLAMP3目录
+        if not self.clamp3_dir.exists():
+            raise FileNotFoundError(f"CLAMP3目录不存在: {self.clamp3_dir}")
+        
+        # 验证关键文件
+        required_files = [
+            "clamp3_embd.py",
+            "utils.py",
+            "code/extract_clamp3.py"
+        ]
+        
+        for file_path in required_files:
+            full_path = self.clamp3_dir / file_path
+            if not full_path.exists():
+                raise FileNotFoundError(f"CLAMP3关键文件不存在: {full_path}")
         
         # 特征缓存
         self.features_cache = {}
         self.load_features_cache()
+        
+        # 临时目录
+        self.temp_dir = Path("temp_clamp3_extraction")
+        
+        logger.info(f"✅ CLAMP3特征提取器初始化完成")
+        logger.info(f"   CLAMP3目录: {self.clamp3_dir}")
+        logger.info(f"   特征目录: {self.features_dir}")
     
     def extract_video_features(self, video_path: str, 
                              extract_ratio: float = 0.25) -> Optional[Dict[str, Any]]:
         """
-        从视频中提取音乐特征
+        使用CLAMP3从视频中提取音乐特征
         
         Args:
             video_path: 视频文件路径
             extract_ratio: 提取比例（默认前25%，对应ISO匹配阶段）
             
         Returns:
-            Dict: 音乐特征字典
+            Dict: 包含CLAMP3特征向量的字典
         """
         video_path = Path(video_path)
         
@@ -66,7 +93,448 @@ class AudioFeatureExtractor:
             return self.features_cache[feature_id]
         
         try:
-            logger.info(f"提取特征: {video_path.name} (前{extract_ratio*100:.0f}%)")
+            logger.info(f"使用CLAMP3提取特征: {video_path.name} (前{extract_ratio*100:.0f}%)")
+            
+            # 1. 提取音频片段
+            audio_path = self._extract_audio_segment(video_path, extract_ratio)
+            if audio_path is None:
+                return None
+            
+            # 2. 使用CLAMP3提取特征
+            clamp3_features = self._extract_clamp3_features(audio_path)
+            if clamp3_features is None:
+                return None
+            
+            # 3. 构建特征字典
+            features = {
+                'clamp3_features': clamp3_features,
+                'feature_vector': clamp3_features,  # 主要特征向量
+                'video_path': str(video_path),
+                'video_name': video_path.name,
+                'extract_ratio': extract_ratio,
+                'feature_id': feature_id,
+                'extracted_at': datetime.now().isoformat(),
+                'file_size': video_path.stat().st_size,
+                'extractor_version': '4.0.0-clamp3',
+                'model_type': 'clamp3-saas'
+            }
+            
+            # 4. 保存到缓存
+            self.features_cache[feature_id] = features
+            self._save_features_cache()
+            
+            logger.info(f"✅ CLAMP3特征提取完成: {video_path.name}")
+            logger.info(f"   特征维度: {clamp3_features.shape if isinstance(clamp3_features, np.ndarray) else 'unknown'}")
+            
+            return features
+            
+        except Exception as e:
+            logger.error(f"CLAMP3特征提取失败: {video_path.name}, 错误: {e}")
+            return None
+        finally:
+            # 清理临时文件
+            self._cleanup_temp_files()
+    
+    def _generate_feature_id(self, video_path: Path, extract_ratio: float) -> str:
+        """生成特征的唯一ID"""
+        stat = video_path.stat()
+        content = f"clamp3_{video_path.name}_{stat.st_size}_{stat.st_mtime}_{extract_ratio}"
+        return hashlib.md5(content.encode()).hexdigest()
+    
+    def _extract_audio_segment(self, video_path: Path, extract_ratio: float) -> Optional[str]:
+        """
+        从视频中提取音频片段
+        
+        Args:
+            video_path: 视频文件路径
+            extract_ratio: 提取比例
+            
+        Returns:
+            str: 临时音频文件路径
+        """
+        try:
+            # 首先获取视频时长
+            duration = self._get_video_duration(video_path)
+            if duration is None:
+                return None
+            
+            # 计算提取时长
+            extract_duration = duration * extract_ratio
+            
+            # 创建临时目录
+            self.temp_dir.mkdir(exist_ok=True)
+            
+            # 生成临时音频文件路径
+            temp_audio_path = self.temp_dir / f"{video_path.stem}_segment.wav"
+            
+            # 使用ffmpeg提取音频
+            cmd = [
+                'ffmpeg', '-y',
+                '-i', str(video_path),
+                '-t', str(extract_duration),  # 只提取前N秒
+                '-vn',  # 不要视频
+                '-acodec', 'pcm_s16le',  # 16位PCM
+                '-ar', '22050',  # 22.05kHz采样率
+                '-ac', '1',  # 单声道
+                str(temp_audio_path)
+            ]
+            
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+            
+            if result.returncode != 0:
+                logger.error(f"ffmpeg音频提取失败: {result.stderr}")
+                return None
+            
+            if not temp_audio_path.exists():
+                logger.error(f"音频文件提取失败: {temp_audio_path}")
+                return None
+            
+            logger.info(f"✅ 音频提取完成: {temp_audio_path.name} ({extract_duration:.1f}s)")
+            return str(temp_audio_path)
+            
+        except Exception as e:
+            logger.error(f"音频提取失败: {e}")
+            return None
+    
+    def _extract_clamp3_features(self, audio_path: str) -> Optional[np.ndarray]:
+        """
+        使用CLAMP3提取音频特征
+        
+        Args:
+            audio_path: 音频文件路径
+            
+        Returns:
+            np.ndarray: CLAMP3特征向量
+        """
+        try:
+            # 创建临时输入目录（CLAMP3需要目录作为输入）
+            temp_input_dir = self.temp_dir / "input"
+            temp_input_dir.mkdir(exist_ok=True)
+            
+            # 复制音频文件到临时输入目录
+            audio_path = Path(audio_path)
+            temp_audio_in_dir = temp_input_dir / audio_path.name
+            shutil.copy(audio_path, temp_audio_in_dir)
+            
+            # 创建特征输出目录
+            temp_output_dir = self.temp_dir / "output"
+            temp_output_dir.mkdir(exist_ok=True)
+            
+            # 保存当前工作目录
+            original_cwd = os.getcwd()
+            
+            try:
+                # 切换到CLAMP3目录
+                os.chdir(self.clamp3_dir)
+                
+                # 调用CLAMP3提取特征
+                cmd = [
+                    'python', 'clamp3_embd.py', 
+                    str(temp_input_dir), 
+                    str(temp_output_dir),
+                    '--get_global'
+                ]
+                
+                logger.info(f"执行CLAMP3特征提取: {' '.join(cmd)}")
+                
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+                
+                if result.returncode != 0:
+                    logger.error(f"CLAMP3执行失败: {result.stderr}")
+                    
+                    # 检查是否是依赖问题
+                    if "ModuleNotFoundError" in result.stderr:
+                        logger.warning("CLAMP3依赖缺失，请安装requirements.txt中的依赖")
+                        logger.warning("或者运行：pip install -r CLAMP3/requirements.txt")
+                    
+                    return None
+                
+                # 查找输出的特征文件
+                feature_files = list(temp_output_dir.glob("*.npy"))
+                
+                if not feature_files:
+                    logger.error("CLAMP3未生成特征文件")
+                    return None
+                
+                # 加载特征文件
+                feature_file = feature_files[0]
+                features = np.load(feature_file)
+                
+                logger.info(f"✅ CLAMP3特征加载成功: {features.shape}")
+                
+                return features
+                
+            finally:
+                # 恢复工作目录
+                os.chdir(original_cwd)
+                
+        except Exception as e:
+            logger.error(f"CLAMP3特征提取失败: {e}")
+            
+            # 如果是依赖问题，给出提示
+            if "ModuleNotFoundError" in str(e):
+                logger.warning("CLAMP3依赖缺失，请安装requirements.txt中的依赖")
+                logger.warning("或者运行：pip install -r CLAMP3/requirements.txt")
+            
+            return None
+    
+    def _get_video_duration(self, video_path: Path) -> Optional[float]:
+        """获取视频时长"""
+        try:
+            cmd = [
+                'ffprobe', '-v', 'quiet', '-print_format', 'json',
+                '-show_format', str(video_path)
+            ]
+            
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+            
+            if result.returncode != 0:
+                return None
+            
+            data = json.loads(result.stdout)
+            return float(data['format'].get('duration', 0))
+            
+        except Exception:
+            return None
+    
+    def _cleanup_temp_files(self):
+        """清理临时文件"""
+        try:
+            if self.temp_dir.exists():
+                shutil.rmtree(self.temp_dir)
+                logger.debug(f"清理临时目录: {self.temp_dir}")
+        except Exception as e:
+            logger.warning(f"清理临时文件失败: {e}")
+    
+    def extract_batch_features(self, video_list: List[Dict[str, Any]], 
+                             extract_ratio: float = 0.25) -> Dict[str, Dict[str, Any]]:
+        """
+        批量提取CLAMP3特征
+        
+        Args:
+            video_list: 视频信息列表
+            extract_ratio: 提取比例
+            
+        Returns:
+            Dict: 视频路径到特征的映射
+        """
+        features_db = {}
+        
+        logger.info(f"开始批量CLAMP3特征提取，共 {len(video_list)} 个视频")
+        
+        for i, video_info in enumerate(video_list, 1):
+            video_path = video_info.get('segment_path') or video_info.get('file_path')
+            
+            if not video_path:
+                logger.warning(f"视频信息缺少路径: {video_info}")
+                continue
+            
+            logger.info(f"处理 {i}/{len(video_list)}: {Path(video_path).name}")
+            
+            features = self.extract_video_features(video_path, extract_ratio)
+            
+            if features:
+                features_db[video_path] = features
+                # 添加视频信息
+                features.update({
+                    'source_info': video_info
+                })
+            else:
+                logger.warning(f"CLAMP3特征提取失败: {video_path}")
+        
+        logger.info(f"✅ 批量CLAMP3特征提取完成，成功 {len(features_db)}/{len(video_list)}")
+        
+        # 保存特征数据库
+        self._save_features_database(features_db)
+        
+        return features_db
+    
+    def _save_features_database(self, features_db: Dict[str, Dict[str, Any]]):
+        """保存特征数据库"""
+        db_file = self.features_dir / "clamp3_features_database.json"
+        
+        try:
+            # 将numpy数组转换为列表以便JSON序列化
+            serializable_db = {}
+            for video_path, features in features_db.items():
+                serializable_features = dict(features)
+                
+                # 转换numpy数组
+                if 'clamp3_features' in serializable_features:
+                    clamp3_feat = serializable_features['clamp3_features']
+                    if isinstance(clamp3_feat, np.ndarray):
+                        serializable_features['clamp3_features'] = clamp3_feat.tolist()
+                        serializable_features['clamp3_features_shape'] = clamp3_feat.shape
+                
+                if 'feature_vector' in serializable_features:
+                    feat_vec = serializable_features['feature_vector']
+                    if isinstance(feat_vec, np.ndarray):
+                        serializable_features['feature_vector'] = feat_vec.tolist()
+                        serializable_features['feature_vector_shape'] = feat_vec.shape
+                
+                serializable_db[video_path] = serializable_features
+            
+            with open(db_file, 'w', encoding='utf-8') as f:
+                json.dump({
+                    'features_database': serializable_db,
+                    'created_at': datetime.now().isoformat(),
+                    'total_videos': len(features_db),
+                    'extractor_version': '4.0.0-clamp3',
+                    'model_type': 'clamp3-saas'
+                }, f, indent=2, ensure_ascii=False)
+            
+            logger.info(f"✅ CLAMP3特征数据库已保存: {db_file}")
+            
+        except Exception as e:
+            logger.error(f"保存CLAMP3特征数据库失败: {e}")
+    
+    def load_features_database(self) -> Optional[Dict[str, Dict[str, Any]]]:
+        """加载特征数据库"""
+        db_file = self.features_dir / "clamp3_features_database.json"
+        
+        if not db_file.exists():
+            logger.info("CLAMP3特征数据库文件不存在")
+            return None
+        
+        try:
+            with open(db_file, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            
+            features_db = data.get('features_database', {})
+            
+            # 将列表转换回numpy数组
+            for video_path, features in features_db.items():
+                if 'clamp3_features' in features and isinstance(features['clamp3_features'], list):
+                    features['clamp3_features'] = np.array(features['clamp3_features'])
+                if 'feature_vector' in features and isinstance(features['feature_vector'], list):
+                    features['feature_vector'] = np.array(features['feature_vector'])
+            
+            logger.info(f"✅ 加载CLAMP3特征数据库成功，共 {len(features_db)} 个视频特征")
+            
+            return features_db
+            
+        except Exception as e:
+            logger.error(f"加载CLAMP3特征数据库失败: {e}")
+            return None
+    
+    def _save_features_cache(self):
+        """保存特征缓存"""
+        cache_file = self.features_dir / "clamp3_features_cache.json"
+        
+        try:
+            # 将numpy数组转换为列表以便JSON序列化
+            serializable_cache = {}
+            for feature_id, features in self.features_cache.items():
+                serializable_features = dict(features)
+                
+                # 转换numpy数组
+                if 'clamp3_features' in serializable_features:
+                    clamp3_feat = serializable_features['clamp3_features']
+                    if isinstance(clamp3_feat, np.ndarray):
+                        serializable_features['clamp3_features'] = clamp3_feat.tolist()
+                        serializable_features['clamp3_features_shape'] = clamp3_feat.shape
+                
+                if 'feature_vector' in serializable_features:
+                    feat_vec = serializable_features['feature_vector']
+                    if isinstance(feat_vec, np.ndarray):
+                        serializable_features['feature_vector'] = feat_vec.tolist()
+                        serializable_features['feature_vector_shape'] = feat_vec.shape
+                
+                serializable_cache[feature_id] = serializable_features
+            
+            with open(cache_file, 'w', encoding='utf-8') as f:
+                json.dump(serializable_cache, f, indent=2, ensure_ascii=False)
+                
+        except Exception as e:
+            logger.error(f"保存CLAMP3特征缓存失败: {e}")
+    
+    def load_features_cache(self):
+        """加载特征缓存"""
+        cache_file = self.features_dir / "clamp3_features_cache.json"
+        
+        if cache_file.exists():
+            try:
+                with open(cache_file, 'r', encoding='utf-8') as f:
+                    cached_data = json.load(f)
+                
+                # 将列表转换回numpy数组
+                for feature_id, features in cached_data.items():
+                    if 'clamp3_features' in features and isinstance(features['clamp3_features'], list):
+                        features['clamp3_features'] = np.array(features['clamp3_features'])
+                    if 'feature_vector' in features and isinstance(features['feature_vector'], list):
+                        features['feature_vector'] = np.array(features['feature_vector'])
+                
+                self.features_cache = cached_data
+                logger.info(f"加载CLAMP3特征缓存: {len(self.features_cache)} 项")
+                
+            except Exception as e:
+                logger.error(f"加载CLAMP3特征缓存失败: {e}")
+                self.features_cache = {}
+        else:
+            self.features_cache = {}
+
+class AudioFeatureExtractor:
+    """
+    音频特征提取器（兼容性保持）
+    从视频中提取音频并分析其音乐特征
+    现在使用CLAMP3作为主要特征提取引擎
+    """
+    
+    def __init__(self, features_dir: str = "materials/features"):
+        """
+        初始化特征提取器
+        
+        Args:
+            features_dir: 特征存储目录
+        """
+        self.features_dir = Path(features_dir)
+        self.features_dir.mkdir(parents=True, exist_ok=True)
+        
+        # 初始化CLAMP3特征提取器
+        try:
+            self.clamp3_extractor = CLAMP3FeatureExtractor(features_dir=features_dir)
+            self.use_clamp3 = True
+            logger.info("✅ AudioFeatureExtractor使用CLAMP3作为后端")
+        except Exception as e:
+            logger.warning(f"CLAMP3初始化失败，使用传统特征提取: {e}")
+            self.use_clamp3 = False
+            # 特征缓存
+            self.features_cache = {}
+            self.load_features_cache()
+    
+    def extract_video_features(self, video_path: str, 
+                             extract_ratio: float = 0.25) -> Optional[Dict[str, Any]]:
+        """
+        从视频中提取音乐特征
+        
+        Args:
+            video_path: 视频文件路径
+            extract_ratio: 提取比例（默认前25%，对应ISO匹配阶段）
+            
+        Returns:
+            Dict: 音乐特征字典
+        """
+        # 如果可用，使用CLAMP3提取特征
+        if self.use_clamp3:
+            return self.clamp3_extractor.extract_video_features(video_path, extract_ratio)
+        
+        # 否则使用传统特征提取方法
+        video_path = Path(video_path)
+        
+        if not video_path.exists():
+            logger.error(f"视频文件不存在: {video_path}")
+            return None
+        
+        # 生成特征ID
+        feature_id = self._generate_feature_id(video_path, extract_ratio)
+        
+        # 检查缓存
+        if feature_id in self.features_cache:
+            logger.info(f"使用缓存特征: {video_path.name}")
+            return self.features_cache[feature_id]
+        
+        try:
+            logger.info(f"提取传统特征: {video_path.name} (前{extract_ratio*100:.0f}%)")
             
             # 1. 提取音频
             audio_data = self._extract_audio_segment(video_path, extract_ratio)
@@ -86,14 +554,14 @@ class AudioFeatureExtractor:
                 'feature_id': feature_id,
                 'extracted_at': datetime.now().isoformat(),
                 'file_size': video_path.stat().st_size,
-                'extractor_version': '4.0.0'
+                'extractor_version': '4.0.0-fallback'
             })
             
             # 4. 保存到缓存
             self.features_cache[feature_id] = features
             self._save_features_cache()
             
-            logger.info(f"✅ 特征提取完成: {video_path.name}")
+            logger.info(f"✅ 传统特征提取完成: {video_path.name}")
             return features
             
         except Exception as e:
@@ -427,9 +895,14 @@ class AudioFeatureExtractor:
         Returns:
             Dict: 视频路径到特征的映射
         """
+        # 如果可用，使用CLAMP3批量提取
+        if self.use_clamp3:
+            return self.clamp3_extractor.extract_batch_features(video_list, extract_ratio)
+        
+        # 否则使用传统批量提取
         features_db = {}
         
-        logger.info(f"开始批量特征提取，共 {len(video_list)} 个视频")
+        logger.info(f"开始批量传统特征提取，共 {len(video_list)} 个视频")
         
         for i, video_info in enumerate(video_list, 1):
             video_path = video_info.get('segment_path') or video_info.get('file_path')
@@ -451,7 +924,7 @@ class AudioFeatureExtractor:
             else:
                 logger.warning(f"特征提取失败: {video_path}")
         
-        logger.info(f"✅ 批量特征提取完成，成功 {len(features_db)}/{len(video_list)}")
+        logger.info(f"✅ 批量传统特征提取完成，成功 {len(features_db)}/{len(video_list)}")
         
         # 保存特征数据库
         self._save_features_database(features_db)
@@ -478,6 +951,11 @@ class AudioFeatureExtractor:
     
     def load_features_database(self) -> Optional[Dict[str, Dict[str, Any]]]:
         """加载特征数据库"""
+        # 如果可用，使用CLAMP3加载数据库
+        if self.use_clamp3:
+            return self.clamp3_extractor.load_features_database()
+        
+        # 否则使用传统方法
         db_file = self.features_dir / "features_database.json"
         
         if not db_file.exists():
