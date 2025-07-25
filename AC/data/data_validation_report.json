@@ -1,0 +1,23 @@
+{
+  "train": {
+    "samples": 43410,
+    "emotion_dimensions": 27,
+    "avg_emotions_per_sample": 0.8272978576364893,
+    "avg_total_intensity": 0.8272978576364893,
+    "most_common_emotion": "钦佩"
+  },
+  "dev": {
+    "samples": 5426,
+    "emotion_dimensions": 27,
+    "avg_emotions_per_sample": 0.8263914485809067,
+    "avg_total_intensity": 0.8263914485809067,
+    "most_common_emotion": "钦佩"
+  },
+  "test": {
+    "samples": 5427,
+    "emotion_dimensions": 27,
+    "avg_emotions_per_sample": 0.8172102450709416,
+    "avg_total_intensity": 0.8172102450709416,
+    "most_common_emotion": "钦佩"
+  }
+}

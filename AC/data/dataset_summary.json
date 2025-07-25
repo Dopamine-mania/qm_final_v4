@@ -1,0 +1,11 @@
+{
+  "dataset_name": "GoEmotions",
+  "source": "Google Research",
+  "emotion_taxonomy": "Cowen & Keltner (2017) 27 dimensions",
+  "splits": {},
+  "mapping_info": {
+    "original_labels": 27,
+    "target_emotions": 27,
+    "mapping_coverage": 1.0
+  }
+}

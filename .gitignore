@@ -89,3 +89,28 @@ materials/features/
 *.log
 *.tmp
 temp/
+
+# AC模块相关 - 排除大文件
+AC/models/
+AC/wandb/
+AC/data/goemotions_*.csv
+AC/data/processed_*.csv
+
+# CLAMP3模块相关  
+clamp3/.gradio/
+clamp3/temp_*/
+clamp3/test_audio/
+clamp3/code/*.pth
+clamp3/preprocessing/audio/logs/
+
+# 模型权重文件
+*.pth
+*.bin
+*.safetensors
+*.h5
+
+# 大型数据文件
+*.wav
+*.mp3
+*.mp4
+*.avi

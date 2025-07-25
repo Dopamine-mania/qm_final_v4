@@ -59,16 +59,44 @@ class VideoRetrievalEngine:
     
     def load_databases(self):
         """加载特征数据库和情绪数据库"""
-        # 加载音频特征数据库
-        features_db_file = self.features_dir / "features_database.json"
-        if features_db_file.exists():
+        # 首先尝试加载新的CLAMP3缓存格式
+        clamp3_cache_file = self.features_dir / "clamp3_features_cache.json"
+        if clamp3_cache_file.exists():
             try:
-                with open(features_db_file, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-                self.features_database = data.get('features_database', {})
-                logger.info(f"✅ 加载特征数据库: {len(self.features_database)} 个视频")
+                with open(clamp3_cache_file, 'r', encoding='utf-8') as f:
+                    cache_data = json.load(f)
+                
+                # 转换缓存格式为特征数据库格式
+                self.features_database = {}
+                for feature_id, feature_data in cache_data.items():
+                    video_name = feature_data.get('video_name', 'unknown')
+                    # 重建numpy数组
+                    if 'feature_vector' in feature_data and 'feature_vector_shape' in feature_data:
+                        feature_vector = np.array(feature_data['feature_vector'])
+                        feature_data['feature_vector'] = feature_vector
+                    
+                    self.features_database[video_name] = feature_data
+                
+                logger.info(f"✅ 加载CLAMP3特征缓存: {len(self.features_database)} 个视频")
             except Exception as e:
-                logger.error(f"加载特征数据库失败: {e}")
+                logger.error(f"加载CLAMP3特征缓存失败: {e}")
+        
+        # 备用：尝试加载旧的特征数据库格式
+        else:
+            features_db_file = self.features_dir / "features_database.json"
+            if features_db_file.exists():
+                try:
+                    with open(features_db_file, 'r', encoding='utf-8') as f:
+                        data = json.load(f)
+                    self.features_database = data.get('features_database', {})
+                    logger.info(f"✅ 加载特征数据库: {len(self.features_database)} 个视频")
+                except Exception as e:
+                    logger.error(f"加载特征数据库失败: {e}")
+        
+        # 如果没有找到任何特征数据库
+        if not hasattr(self, 'features_database') or not self.features_database:
+            self.features_database = {}
+            logger.warning("特征数据库为空，请先提取视频特征")
         
         # 构建情绪数据库
         self._build_emotion_database()

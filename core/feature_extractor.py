@@ -59,8 +59,8 @@ class CLAMP3FeatureExtractor:
         self.features_cache = {}
         self.load_features_cache()
         
-        # 临时目录
-        self.temp_dir = Path("temp_clamp3_extraction")
+        # 临时目录 - 使用绝对路径
+        self.temp_dir = Path("temp_clamp3_extraction").resolve()
         
         logger.info(f"✅ CLAMP3特征提取器初始化完成")
         logger.info(f"   CLAMP3目录: {self.clamp3_dir}")
@@ -103,7 +103,9 @@ class CLAMP3FeatureExtractor:
             # 2. 使用CLAMP3提取特征
             clamp3_features = self._extract_clamp3_features(audio_path)
             if clamp3_features is None:
-                return None
+                logger.warning("CLAMP3特征提取失败，降级到传统音频特征")
+                # 降级到传统音频特征
+                return self._extract_fallback_features(audio_path, video_path, extract_ratio, feature_id)
             
             # 3. 构建特征字典
             features = {
@@ -130,10 +132,106 @@ class CLAMP3FeatureExtractor:
             
         except Exception as e:
             logger.error(f"CLAMP3特征提取失败: {video_path.name}, 错误: {e}")
+            logger.warning("降级到传统音频特征")
+            
+            # 尝试降级特征提取
+            try:
+                audio_path = self._extract_audio_segment(video_path, extract_ratio)
+                if audio_path:
+                    return self._extract_fallback_features(audio_path, video_path, extract_ratio, feature_id)
+            except Exception as fallback_error:
+                logger.error(f"降级特征提取也失败: {fallback_error}")
+            
             return None
         finally:
             # 清理临时文件
             self._cleanup_temp_files()
+    
+    def _extract_fallback_features(self, audio_path: str, video_path: Path, 
+                                 extract_ratio: float, feature_id: str) -> Optional[Dict[str, Any]]:
+        """
+        降级特征提取方法 - 使用librosa提取传统音频特征
+        """
+        try:
+            import librosa
+            
+            logger.info("使用Librosa提取传统音频特征")
+            
+            # 加载音频
+            y, sr = librosa.load(audio_path, sr=22050)
+            
+            # 提取多种特征
+            features = {}
+            
+            # 1. MFCC特征 (13维)
+            mfcc = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=13)
+            features['mfcc_mean'] = np.mean(mfcc, axis=1)
+            features['mfcc_std'] = np.std(mfcc, axis=1)
+            
+            # 2. 色谱特征 (12维)
+            chroma = librosa.feature.chroma_stft(y=y, sr=sr)
+            features['chroma_mean'] = np.mean(chroma, axis=1)
+            features['chroma_std'] = np.std(chroma, axis=1)
+            
+            # 3. 谱质心
+            centroid = librosa.feature.spectral_centroid(y=y, sr=sr)
+            features['spectral_centroid'] = np.mean(centroid)
+            
+            # 4. 谱带宽
+            bandwidth = librosa.feature.spectral_bandwidth(y=y, sr=sr)
+            features['spectral_bandwidth'] = np.mean(bandwidth)
+            
+            # 5. 过零率
+            zcr = librosa.feature.zero_crossing_rate(y)
+            features['zero_crossing_rate'] = np.mean(zcr)
+            
+            # 6. RMS能量
+            rms = librosa.feature.rms(y=y)
+            features['rms_energy'] = np.mean(rms)
+            
+            # 7. 谱回滚点
+            rolloff = librosa.feature.spectral_rolloff(y=y, sr=sr)
+            features['spectral_rolloff'] = np.mean(rolloff)
+            
+            # 组合所有特征为一个向量
+            feature_vector = np.concatenate([
+                features['mfcc_mean'],
+                features['mfcc_std'], 
+                features['chroma_mean'],
+                features['chroma_std'],
+                [features['spectral_centroid']],
+                [features['spectral_bandwidth']],
+                [features['zero_crossing_rate']],
+                [features['rms_energy']],
+                [features['spectral_rolloff']]
+            ])
+            
+            # 构建结果字典
+            result = {
+                'librosa_features': features,
+                'feature_vector': feature_vector,  # 主要特征向量
+                'video_path': str(video_path),
+                'video_name': video_path.name,
+                'extract_ratio': extract_ratio,
+                'feature_id': feature_id,
+                'extracted_at': datetime.now().isoformat(),
+                'file_size': video_path.stat().st_size,
+                'extractor_version': '4.0.0-fallback',
+                'model_type': 'librosa-traditional'
+            }
+            
+            # 保存到缓存
+            self.features_cache[feature_id] = result
+            self._save_features_cache()
+            
+            logger.info(f"✅ 降级特征提取完成: {video_path.name}")
+            logger.info(f"   特征维度: {feature_vector.shape}")
+            
+            return result
+            
+        except Exception as e:
+            logger.error(f"降级特征提取失败: {e}")
+            return None
     
     def _generate_feature_id(self, video_path: Path, extract_ratio: float) -> str:
         """生成特征的唯一ID"""
@@ -216,9 +314,14 @@ class CLAMP3FeatureExtractor:
             temp_audio_in_dir = temp_input_dir / audio_path.name
             shutil.copy(audio_path, temp_audio_in_dir)
             
-            # 创建特征输出目录
-            temp_output_dir = self.temp_dir / "output"
-            temp_output_dir.mkdir(exist_ok=True)
+            # 创建唯一的特征输出目录（CLAMP3会创建）
+            import time
+            timestamp = str(int(time.time() * 1000))
+            temp_output_dir = self.temp_dir / f"output_{timestamp}"
+            # 确保目录不存在（CLAMP3要求不存在的目录）
+            if temp_output_dir.exists():
+                shutil.rmtree(temp_output_dir)
+            # 不要预先创建目录，让CLAMP3创建
             
             # 保存当前工作目录
             original_cwd = os.getcwd()
@@ -227,7 +330,7 @@ class CLAMP3FeatureExtractor:
                 # 切换到CLAMP3目录
                 os.chdir(self.clamp3_dir)
                 
-                # 调用CLAMP3提取特征
+                # 使用绝对路径
                 cmd = [
                     'python', 'clamp3_embd.py', 
                     str(temp_input_dir), 
@@ -239,8 +342,14 @@ class CLAMP3FeatureExtractor:
                 
                 result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
                 
+                # 记录CLAMP3的输出信息  
+                if result.stdout:
+                    logger.info(f"CLAMP3输出: {result.stdout}")
+                if result.stderr:
+                    logger.warning(f"CLAMP3错误输出: {result.stderr}")
+                
                 if result.returncode != 0:
-                    logger.error(f"CLAMP3执行失败: {result.stderr}")
+                    logger.error(f"CLAMP3执行失败 (返回码: {result.returncode})")
                     
                     # 检查是否是依赖问题
                     if "ModuleNotFoundError" in result.stderr:
@@ -439,6 +548,16 @@ class CLAMP3FeatureExtractor:
                     if isinstance(feat_vec, np.ndarray):
                         serializable_features['feature_vector'] = feat_vec.tolist()
                         serializable_features['feature_vector_shape'] = feat_vec.shape
+                
+                # 处理降级特征中的嵌套numpy数组和float32
+                if 'librosa_features' in serializable_features:
+                    librosa_feat = serializable_features['librosa_features']
+                    if isinstance(librosa_feat, dict):
+                        for key, value in librosa_feat.items():
+                            if isinstance(value, np.ndarray):
+                                librosa_feat[key] = value.tolist()
+                            elif isinstance(value, (np.float32, np.float64)):
+                                librosa_feat[key] = float(value)
                 
                 serializable_cache[feature_id] = serializable_features
             
